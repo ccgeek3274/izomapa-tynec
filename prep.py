@@ -2,7 +2,7 @@
 
 python prep.py [složka_s_daty]
 """
-import hashlib, json, math, os, random, sys
+import hashlib, json, math, os, random, re, sys
 import numpy as np, pandas as pd, shapely, pyarrow.parquet as pq
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import transform
@@ -157,9 +157,36 @@ NE = N + 2 * MS
 RE = HALF + MS * STEP
 gx, gy = np.meshgrid(np.linspace(-RE, RE, NE), np.linspace(RE, -RE, NE))
 HX = dem(gx, gy)
+# terén z laseru ČÚZK (nastroje/teren.py): přesnější než zdrojový DEM (~10 m/px), který se u řek a náspů mýlí o metry
+if os.path.exists('build/teren_laser.npz'):
+    _tl = np.load('build/teren_laser.npz')
+    _ix = np.rint((gx + CX - float(_tl['x0'])) / float(_tl['step'])).astype(int)
+    _iy = np.rint((float(_tl['y1']) - gy - CY) / float(_tl['step'])).astype(int)
+    _ok = (_ix >= 0) & (_ix < _tl['h'].shape[1]) & (_iy >= 0) & (_iy < _tl['h'].shape[0])
+    HX[_ok] = _tl['h'][_iy[_ok], _ix[_ok]]
+    print('terén z laseru', round(100 * float(_ok.mean()), 1), '% uzlů')
 from numpy.lib.stride_tricks import sliding_window_view
 _hook('terrain')
 HX = sliding_window_view(np.pad(HX, 1, mode='edge'), (3, 3)).mean(axis=(2, 3))
+_hook('terrain_po')                     # úpravy terénu, které vyhlazení nesmí rozmazat (úzký podjezd)
+# hřiště jsou vodorovná: plocha (kurty do 3 m od sebe společně) se srovná na medián terénu pod ní, zčásti zapuštěná, zčásti nasypaná.
+# Výška se bere z mřížky terénu po úpravách (custom_prep.py terrain_po), aby se místní opravy terénu projevily i na hřišti.
+PITCH_MAX = 20000.0                     # větší souvislý areál se nesrovná vcelku, ale po jednotlivých hřištích
+_pp = [p for g_, c_ in zip(*(lambda t: (t.geom, t['class']))(load('land_use'))) if c_ == 'pitch' for p in polys(g_) if p.area > 30]
+_pp = [p for p in _pp if p.intersects(box(-RE - 20, -RE - 20, RE + 20, RE + 20))]
+_plats = []
+for _u in polys(shapely.unary_union([p.buffer(1.5) for p in _pp])) if _pp else []:     # do 3 m od sebe = jedna plošina (areál s uličkami)
+    _plats += [q for q in _pp if q.intersects(_u)] if _u.area > PITCH_MAX else [_u]
+_lv = []                                # (jádro, okraj, výška); okraj nesmí zasáhnout jádro jiné plošiny
+for _pl in sorted(_plats, key=lambda q: -q.area):
+    _m = shapely.contains_xy(_pl.buffer(STEP * 0.75), gx, gy)            # i uzly buněk, které hřiště přetíná
+    if not _m.any(): continue
+    _in = shapely.contains_xy(_pl, gx, gy)
+    _lv.append((_m, shapely.contains_xy(_pl.buffer(STEP * 1.75), gx, gy) & ~_m, float(np.median(HX[_in if _in.any() else _m]))))
+_core = np.zeros_like(HX, bool)
+for _m, _r, _lvl in _lv: HX[_m] = _lvl; _core |= _m
+for _m, _r, _lvl in _lv:
+    _r &= ~_core; HX[_r] = (HX[_r] + _lvl) / 2                          # okraj: půl cesty k okolnímu terénu
 HMIN = HREF; HX = HX - HMIN              # společná výška pro všechny čtverce
 H = HX[MS:MS + N, MS:MS + N]
 
@@ -181,7 +208,7 @@ C = dict(grass=0, garden=1, park=2, meadow=3, forest=4, scrub=5, pitch=6, track=
          rail=19, cemetery=20, wetland=21, rock=22, construction=23, footway=24, pool_edge=25, farmland=26,
          cobble=27, grave=28, manhole=29, court_blue=30, zone=31, zone2=32, piste=33, skijump=34,
          wheat=35, wheat2=36, rape=37, rape2=38, maize=39, maize2=40, soil=41, soil2=42,
-         plaza=43, plaza2=44, deck=45)    # pole: plodina + řádky
+         plaza=43, plaza2=44, deck=45, weir=46, foam=47, clay=48)    # pole: plodina + řádky; jez, pěna pod ním, antuka
 TW = int(2 * HALF / TEX_RES)
 TWE = TW + 2 * MPX                          # rastry včetně pásu sousedů
 cls = Image.new('L', (TWE, TWE), C['grass'])
@@ -240,8 +267,22 @@ if os.path.exists('build/zelen_maska.png'):
         if _lz.shape == _gz.shape: _gz = _gz | _lz
     _GZ = (_gz, json.load(open('build/zelen_maska.json'))['x0y1m'])
 _PARK_Z = set()
+# hřiště: druh sportu a povrch z OSM (nastroje/hriste.py), Overture antuku nerozliší a sport zahodí
+HRISTE = json.load(open('assets/hriste.json')) if os.path.exists('assets/hriste.json') else {}
+for _k, _v in UP.get('hriste', {}).items(): HRISTE[_k] = {**HRISTE.get(_k, {}), **_v}    # ruční oprava: {"w123": {"surface": "clay"}}
+def osm_id(r):
+    for s_ in (r.sources if isinstance(r.get('sources'), (list, np.ndarray)) else []):
+        m_ = re.match(r'([nwr]\d+)@', str(s_.get('record_id') or ''))
+        if m_: return m_[1]
+    return None
+def pitch_info(r):
+    h = HRISTE.get(osm_id(r), {})
+    sport = h.get('sport', ''); sf = h.get('surface') or {'recreation_sand': 'sand'}.get(str(r.get('surface')), '')
+    k = 'clay' if sf == 'clay' else 'sand' if sf == 'sand' or sport == 'beachvolleyball' else 'track' if sf == 'tartan' else 'pitch'
+    return sport, k
 for _, r in lu.iterrows():
     k = SAT['lu'].get(r.id) or LU.get(r['class'])
+    if r['class'] == 'pitch' and not SAT['lu'].get(r.id): k = pitch_info(r)[1]
     block_ = r['class'] in NOTREE_LU
     if k == 'cobble' and _green_share(r.geom) > 0.5: k = 'park'; block_ = False; _PARK_Z.add(r.id)      # náměstí, které je ve skutečnosti park
     if k: fill(r.geom, C[k], block=block_)
@@ -254,9 +295,30 @@ if os.path.exists('build/zelen_maska.png'):
     _a[_hit] = C['grass']; cls.paste(Image.fromarray(_a))
     _n = np.array(notree); _n[_hit] = 0; notree.paste(Image.fromarray(_n))
 # pitch: bílé čáry hřiště. Překrývající se hřiště z dat se sloučí (jinak se čáry kříží); čáry jen u zhruba obdélníkových
-pitch_polys = [p for _, r in lu.iterrows() if r['class'] == 'pitch' and SAT['lu'].get(r.id, 'pitch') in ('pitch', 'track', 'court_blue')
+pitch_polys = [(p, pitch_info(r)[0]) for _, r in lu.iterrows() if r['class'] == 'pitch' and SAT['lu'].get(r.id, 'pitch') in ('pitch', 'track', 'court_blue')
                for p in polys(r.geom.intersection(DRAWBOX)) if p.area > 30]
-for p in polys(shapely.unary_union(pitch_polys)) if pitch_polys else []:
+# sloučí se jen hřiště, která se překrývají; kurty, které se jen dotýkají (tenisový areál), mají každý své čáry
+_pg = list(range(len(pitch_polys)))
+def _root(i):
+    while _pg[i] != i: _pg[i] = _pg[_pg[i]]; i = _pg[i]
+    return i
+_pt = shapely.STRtree([q for q, _s in pitch_polys]) if pitch_polys else None
+for i, (q, _s) in enumerate(pitch_polys):
+    for j in _pt.query(q):
+        if j > i and q.intersection(pitch_polys[j][0]).area > 2.0: _pg[_root(j)] = _root(i)
+_groups = {}
+for i in range(len(pitch_polys)): _groups.setdefault(_root(i), []).append(i)
+def tennis_lines(pt, L, W):
+    # dvorec 23,77 × 10,97 m uprostřed plochy: čáry čtyřhry a dvouhry, podání, síť
+    l0, w0 = (L - 23.77) / 2, (W - 10.97) / 2
+    lines_ = [[(0, 0), (23.77, 0)], [(0, 10.97), (23.77, 10.97)], [(0, 0), (0, 10.97)], [(23.77, 0), (23.77, 10.97)],
+              [(0, 1.37), (23.77, 1.37)], [(0, 9.6), (23.77, 9.6)], [(5.485, 1.37), (5.485, 9.6)], [(18.285, 1.37), (18.285, 9.6)],
+              [(5.485, 5.485), (18.285, 5.485)], [(11.885, -0.5), (11.885, 11.47)]]
+    for a_, b_ in lines_: cd.line(P([pt(l0 + a_[0], w0 + a_[1]), pt(l0 + b_[0], w0 + b_[1])]), fill=C['marking'], width=2)   # 1 px se v pohledu trhá
+for _gi in _groups.values():
+    p = shapely.unary_union([pitch_polys[i][0] for i in _gi])
+    if p.geom_type != 'Polygon': continue
+    sport = pitch_polys[_gi[0]][1] if len(_gi) == 1 else ''
     o = p.minimum_rotated_rectangle
     if p.area / max(o.area, 1) < 0.86: continue                 # nepravidelný tvar: jen plocha bez čar
     q = o.buffer(-0.6, join_style=2)
@@ -267,6 +329,8 @@ for p in polys(shapely.unary_union(pitch_polys)) if pitch_polys else []:
     L, W = np.linalg.norm(e1), np.linalg.norm(e2); u, v = e1 / L, e2 / W
     if L < 12 or W < 6: continue
     pt = lambda s_, t_: tuple(oc[0] + u * s_ + v * t_)
+    if sport.split(';')[0] == 'tennis' and L >= 24 and W >= 11:
+        tennis_lines(pt, L, W); continue
     cd.polygon(P([pt(0, 0), pt(L, 0), pt(L, W), pt(0, W)]), outline=C['marking'])
     cd.line(P([pt(L / 2, 0), pt(L / 2, W)]), fill=C['marking'], width=1)        # středová čára napříč
     if L > 70 and W > 40:                                                       # fotbal: kruh a vápna
@@ -346,6 +410,20 @@ for _, r in wat.iterrows():
         else: fill(g, C['water'], block=True)
     elif r['class'] == 'river':          # jen řeky; potoky v datech často vedou pod domy (zatrubněné) a ve skutečnosti nejsou vidět
         line(g, C['stream'], 6, block=True)
+# jezy: betonová koruna přes řeku a pěna pod přepadem (na níže položené straně podle terénu, tedy po proudu)
+WEIR_W, FOAM_W = 2.2, 2.4
+for _, r in inf.iterrows():
+    if r['class'] != 'weir': continue
+    for l in lines(r.geom):
+        if l.length < 5 or not l.intersects(DRAWBOX): continue
+        mid = l.interpolate(0.5, normalized=True); a_ = l.interpolate(max(0.0, l.length / 2 - 2)); b_ = l.interpolate(min(l.length, l.length / 2 + 2))
+        nx_, ny_ = -(b_.y - a_.y), b_.x - a_.x; nn = math.hypot(nx_, ny_) or 1; nx_, ny_ = nx_ / nn, ny_ / nn
+        z_l, z_r = (float(ground(mid.x + s * nx_ * 10, mid.y + s * ny_ * 10)) for s in (1, -1))
+        side = -1 if z_l > z_r else 1                       # offset_curve: kladně doleva
+        try: foam = l.offset_curve(side * (WEIR_W + FOAM_W) / 2)
+        except Exception: foam = None
+        if foam is not None and not foam.is_empty: line(foam, C['foam'], FOAM_W, block=True)
+        line(l, C['weir'], WEIR_W, block=True)
 
 seg = load('segment')
 # dálnice ve výstavbě se nekreslí (staveniště je vidět ve využití území)
@@ -381,7 +459,8 @@ seg = pd.DataFrame(_rows).reset_index(drop=True)
 # mosty a lávky: úsek označený is_bridge se nekreslí do terénu, ale postaví se jako mostovka (scene.bridges)
 BRIDGE_MIN = 8.0      # kratší „most“ (propustek nad potokem) zůstane obyčejnou cestou
 def bridge_parts(r):
-    fl = r.road_flags if isinstance(r.road_flags, (list, np.ndarray)) else []
+    # silnice mají příznak mostu v road_flags, tratě v rail_flags
+    fl = [f for k in ('road_flags', 'rail_flags') if isinstance(r.get(k), (list, np.ndarray)) for f in r.get(k)]
     br = [f.get('between') for f in fl if 'is_bridge' in list(f.get('values'))]
     if not br: return None
     rng = sorted((0.0, 1.0) if t is None else (float(t[0]), float(t[1])) for t in br)
@@ -429,6 +508,14 @@ GRADE = {'road': 0.06, 'rail': 0.03, 'foot': 0.08}
 roads = [(a_, l_, c_, w_, n_) for a_, g_, c_, w_, n_ in roads for l_ in lines(g_)]
 _under = shapely.STRtree([g for _, g, c, w, _n in roads])
 _water = shapely.unary_union([r.geom.buffer(4) for _, r in wat.iterrows()] or [Point(1e9, 1e9)])
+# skutečná výška mostovek z laseru (nastroje/mosty.py): vysoké mosty a lávky přes řeku mají pod sebou vidět vodu
+_deck_laser = _deck_z = None
+if os.path.exists('assets/mosty_vysky.json'):
+    _ml = json.load(open('assets/mosty_vysky.json'))
+    if _ml:
+        _mx, _my = to_local(np.array([q[1] for q in _ml]), np.array([q[0] for q in _ml]))
+        _deck_laser = shapely.STRtree(shapely.points(np.column_stack([_mx, _my])))
+        _deck_z = np.array([q[2] for q in _ml]) - HMIN
 _rused, _rcut = set(), {}                 # cesty nájezdů tohoto mostu; index -> odříznuté úseky [(a, b)]
 def _approach(pt, dv, kind):
     """navazující cesty od konce mostu směrem dv (stejný druh), nejvýš 8 kusů / 200 m: [(index, směr, odkud)]
@@ -472,10 +559,21 @@ def _cut(app, c):                          # odříznout z cest nájezdu délku 
 def _bkind(r): return 'rail' if r.subtype == 'rail' else 'foot' if r['class'] in FOOT else 'road'
 _bg = {}
 for g0, r in bridge_segs: _bg.setdefault(_bkind(r), []).append((g0, r))
+def _split_sharp(l, max_turn=120.0):
+    """spojené kusy rozdělit, kde se čára otáčí o víc než max_turn° (dvě koleje z jedné výhybky nejsou jeden most)"""
+    c = list(l.coords); out, a = [], 0
+    for i in range(1, len(c) - 1):
+        v1 = np.subtract(c[i][:2], c[i - 1][:2]); v2 = np.subtract(c[i + 1][:2], c[i][:2])
+        n_ = np.linalg.norm(v1) * np.linalg.norm(v2)
+        if n_ > 0 and math.degrees(math.acos(max(-1.0, min(1.0, float(v1 @ v2) / n_)))) > max_turn:
+            out.append(LineString(c[a:i + 1])); a = i
+    out.append(LineString(c[a:]))
+    return [q for q in out if q.length > 0]
 bridge_segs = []
 for _k, items in _bg.items():
-    for l in lines(shapely.ops.linemerge(shapely.MultiLineString([q for g0, _r in items for q in lines(g0)]))):
-        bridge_segs.append((l, max(items, key=lambda it: it[0].intersection(l.buffer(0.5)).length)[1]))
+    for l0 in lines(shapely.ops.linemerge(shapely.MultiLineString([q for g0, _r in items for q in lines(g0)]))):
+        for l in _split_sharp(l0):
+            bridge_segs.append((l, max(items, key=lambda it: it[0].intersection(l.buffer(0.5)).length)[1]))
 DECKS = []                                  # (čára, vzdálenosti, výšky mostovky, výšky terénu, šířka, druh, třída, název)
 for g0, r in bridge_segs:
     for l in lines(g0):
@@ -502,16 +600,32 @@ for g0, r in bridge_segs:
         span = (d >= ds0 - 0.01) & (d <= ds1 + 0.01)
         req = gz + 0.15
         ends = l.boundary.buffer(1.5)
-        cross = [_under.geometries[j] for j in _under.query(l) if _under.geometries[j].intersects(l) and not _under.geometries[j].intersects(ends)]
-        cross = shapely.unary_union(cross).buffer(w / 2 + 3) if cross else None     # cesty a tratě, které vedou pod mostem
+        _cj = [j for j in _under.query(l) if _under.geometries[j].intersects(l) and not _under.geometries[j].intersects(ends)]
+        cross = shapely.unary_union([_under.geometries[j] for j in _cj]).buffer(w / 2 + 3) if _cj else None     # cesty a tratě, které vedou pod mostem
+        # podjezdná výška: nad silnicí a tratí 5,2 m (trať na mostě 6 m), nad pěší cestou stačí podchod 3 m
+        clear = (6.0 if kind == 'rail' else 5.2) if any(roads[j][2] not in FOOT for j in _cj) else 3.0
+        _si = np.where(span)[0]; _low = []; _meas = {}
         for i, (x, y) in enumerate(xy):
             if not span[i]: continue
             pt = Point(x, y)
-            if cross is not None and cross.contains(pt): req[i] = gz[i] + (6.0 if kind == 'rail' else 5.2)
+            if cross is not None and cross.contains(pt): req[i] = gz[i] + clear
             elif _water.contains(pt): req[i] = gz[i] + (1.0 if kind == 'foot' else 1.3)
+            j_ = _deck_laser.query_nearest(pt, max_distance=1.6) if _deck_z is not None else []
+            if len(j_):                                # změřená mostovka (nastroje/mosty.py) má přednost před odhadem z pravidel
+                zl = _deck_z[j_[0]]
+                if gz[i] + 0.5 < zl < gz[i] + 30: req[i] = zl; _meas[i] = zl
+                elif gz[i] - 8 < zl <= gz[i] + 0.5: _low.append(i)
+        # laser ukazuje mostovku na úrovni terénu modelu nebo pod ní (vyhlazený terén nad podjezdem): most se nezvedá
+        if _low and len(_low) >= 0.5 * len([i for i in _si if _deck_z is not None and len(_deck_laser.query_nearest(Point(*xy[i]), max_distance=1.6))]):
+            req[_si] = gz[_si] + 0.15
+        elif _meas:                             # část mostu změřená: zbytek rozpětí se dopočítá z měření, ne z pravidel
+            _mi = sorted(_meas); _rest = [i for i in _si if i not in _meas]
+            req[_rest] = np.maximum(gz[_rest] + 0.15, np.interp(d[_rest], d[_mi], [_meas[i] for i in _mi]))
         G = GRADE[kind]
         hr = req - gz                                  # požadovaná výška nad terénem; nájezd ji ubírá o G na metr (cesta dál kopíruje svah)
         hz = np.max(hr[None, :] - G * np.abs(d[:, None] - d[None, :]), axis=1)
+        # u místní prohlubně pod mostem (podjezd) by výška nad terénem táhla nájezd vysoko nad okolí: stačí absolutní sklon od mostovky
+        hz = np.minimum(hz, np.max(req[None, _si] - G * np.abs(d[:, None] - d[None, _si]), axis=1) - gz)
         hz = np.minimum(hz, 0.15 + 0.2 * np.minimum(d, L - d))   # konce vždy na terénu (krátký nájezd = strmější)
         z = gz + np.maximum(hz, 0.15)
         si = np.where(span)[0]
@@ -1588,7 +1702,8 @@ SEASON_PAL = {
                'piste': (150, 178, 92), 'skijump': (98, 160, 150),
                'wheat': (214, 186, 106), 'wheat2': (194, 162, 86), 'rape': (150, 148, 82), 'rape2': (128, 126, 70),
                'maize': (80, 134, 58), 'maize2': (58, 106, 44), 'soil': (110, 142, 66), 'soil2': (128, 104, 70),
-               'plaza': (186, 186, 184), 'plaza2': (206, 206, 200), 'deck': (146, 104, 88)},
+               'plaza': (186, 186, 184), 'plaza2': (206, 206, 200), 'deck': (146, 104, 88),
+               'weir': (172, 170, 162), 'foam': (150, 190, 226), 'clay': (190, 100, 66)},
 }
 sp = dict(SEASON_PAL['summer'])
 sp.update({'grass': (122, 176, 80), 'garden': (132, 184, 86), 'park': (118, 180, 78), 'meadow': (150, 188, 90),
@@ -1611,7 +1726,8 @@ wi.update({'forest': (214, 222, 232), 'scrub': (220, 226, 234), 'paved': (222, 2
            'parking': (176, 180, 188), 'road': (104, 106, 114), 'marking': (190, 192, 196), 'curb': (226, 230, 236),
            'dirt': (214, 214, 218), 'water': (186, 210, 228), 'pool': (150, 168, 184), 'stream': (58, 96, 136),
            'footway': (226, 230, 236), 'cobble': (206, 210, 218), 'pool_edge': (230, 234, 238), 'grave': (222, 226, 232), 'manhole': (90, 92, 98)})
-wi.update({'plaza': (208, 212, 220), 'plaza2': (222, 226, 232), 'deck': (176, 160, 160)})
+wi.update({'plaza': (208, 212, 220), 'plaza2': (222, 226, 232), 'deck': (176, 160, 160),
+           'weir': (214, 218, 226), 'foam': (206, 224, 238), 'clay': snow})
 SEASON_PAL['winter'] = wi
 
 # kontrolní ohraničení zón upřesněných podle snímků (geo.SAT_OUTLINE, po kontrole vypnout)

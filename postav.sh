@@ -13,6 +13,8 @@ dir() { if [ "$1" = "0,0" ]; then echo data; else echo data_c$(echo $1 | tr ',' 
 if [ "$1" != render ]; then
   python fetch_data.py --vse                                  # Overture (OSM) + terén, místa, části obce
   [ -f assets/dmp_vysky.json ] || { python dmp_fetch.py && python dmp_vysky.py; }          # výšky budov z laseru ČÚZK
+  [ -f assets/mosty_vysky.json ] || python nastroje/mosty.py                                # výšky mostovek z laseru ČÚZK
+  [ -f build/teren_laser.npz ] || python nastroje/teren.py                                  # terén celé mapy z laseru ČÚZK (DMR 5G)
   [ -f build/les_maska.png ] || python nastroje/les.py                                     # les podle ortofota
   [ -f assets/zabaged.json ] || { python nastroje/zabaged.py && python nastroje/pole.py; } # pole a louky
 fi

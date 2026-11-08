@@ -8,6 +8,10 @@ if HOOK == 'terrain':
     # Například lokální snížení/zvýšení terénu v polygonu:
     pass
 
+elif HOOK == 'terrain_po':
+    # Úprava mřížky terénu HX až po vyhlazení (úzké prvky, které by vyhlazení rozmazalo, např. podjezd pod tratí).
+    pass
+
 elif HOOK == 'cemetery':
     # Úpravy hřbitova před generováním hrobů (např. aleje stromů, studna, vynechání ploch).
     # K dispozici jsou: trees, EXT_P, nograve, AREA, DRAWBOX atd.
