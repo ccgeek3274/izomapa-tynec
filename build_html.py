@@ -100,6 +100,11 @@ SITE_URL = (MESTO.get('url') or '').rstrip('/')
 open('site/robots.txt', 'w').write('User-agent: *\nAllow: /\n' + (f'Sitemap: {SITE_URL}/sitemap.xml\n' if SITE_URL else ''))
 if SITE_URL:
     open('site/sitemap.xml', 'w').write(f'<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>{SITE_URL}/</loc></url></urlset>\n')
+# cache pro hosting, který čte _headers (Cloudflare Workers/Pages, Netlify): dlaždice, náhledy a stromy mají v adrese verzi
+# renderu (?v=), takže se můžou cachovat dlouho (mesto.json "cache_dni", výchozí 7); JSON z overlay.py a mhd.py se mění
+# i bez renderu (stejná verze), proto zůstávají na výchozím ověřování u serveru
+_max = int(float(MESTO.get('cache_dni', 7)) * 86400)
+open('site/_headers', 'w').write(''.join(f'/{d}/*\n  Cache-Control: public, max-age={_max}\n' for d in ('tiles', 'preview', 'stromy')))
 if MESTO.get('hlaseni'):                              # volitelná administrace hlášení (server v hlaseni/)
     open('site/admin.html', 'w', encoding='utf-8').write(open('hlaseni/admin.html', encoding='utf-8').read())
 

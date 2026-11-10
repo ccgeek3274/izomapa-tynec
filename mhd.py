@@ -1,10 +1,11 @@
 """MHD podle jízdních řádů (GTFS, adresa v mesto.json mhd.gtfs) -> site/mhd.json
 
 python mhd.py [--stahnout]   stáhne build/gtfs.zip (při --stahnout nebo když je starší než den) a převede ho:
-  routes   [číslo linky, typ (0 tramvaj, 2 vlak, 3 autobus)]
+  routes   [číslo linky, typ (0 tramvaj, 2 vlak, 3 autobus), celý název linky]
   shapes   trasy ve světových souřadnicích mapy [[x, y], ...] (zjednodušené na 1 m)
   services kalendář {id: [po..ne (7× 0/1), od, do, [přidané dny], [zrušené dny]]}
-  trips    [linka, trasa, služba, začátek (s od půlnoci), [Δt, vzdálenost po trase (m)] × zastávky, cíl, [zastávka, Δt příjezdu] × zastávky]
+  trips    [linka, trasa, služba, začátek (s od půlnoci), [Δt, vzdálenost po trase (m)] × zastávky, cíl, [zastávka, Δt příjezdu] × zastávky,
+            [Δt odjezdu podle jízdního řádu] × zastávky, číslo spoje (vlak: „Os 9032“), příznaky (1 bezbariérový, 2 kola)]
   heads, stops  názvy cílů a zastávek (indexy v trips)
 Krajské GTFS (např. IDS JMK) se ořízne: jen autobusy a tramvaje, jejichž trasa vede územím mapy.
 Prohlížeč z toho podle skutečného času dopočítá, kde je každé vozidlo. Bez mhd.gtfs skript nic neudělá.
@@ -76,7 +77,7 @@ TI = {t['trip_id'] for t in trips}; SV = {t['service_id'] for t in trips}
 st = {k: [(q, a_, d_, dist, SN.get(z, '')) for q, a_, d_, dist, z in v] for k, v in st.items() if k in TI}
 routes, RI = [], {}
 for rid in dict.fromkeys(t['route_id'] for t in trips):
-    RI[rid] = len(routes); routes.append([RT[rid]['route_short_name'], KIND(int(RT[rid]['route_type'] or 3))])
+    RI[rid] = len(routes); routes.append([RT[rid]['route_short_name'], KIND(int(RT[rid]['route_type'] or 3)), RT[rid].get('route_long_name') or ''])
 services = {}
 for c in T('calendar'):
     if c['service_id'] not in SV: continue
@@ -96,8 +97,9 @@ for t in trips:
     s = st.get(t['trip_id'], [])
     if len(s) < 2 or t['shape_id'] not in SI: continue
     L, gl = SLEN[t['shape_id']]; k = L / gl                     # vzdálenost z jízdního řádu -> délka trasy v mapě
-    t0 = s[0][1]; seq = []; zs = []
+    t0 = s[0][1]; seq = []; zs = []; dep = []
     for j, (_, a, d, dist, nm) in enumerate(s):
+        dep.append(d - t0)                                   # odjezd podle jízdního řádu (do lišty sledovaného vozidla)
         if 0 < j < len(s) - 1 and d == a:                    # jízdní řád je po minutách: v zastávce stát ~20 s kolem času odjezdu
             gap = min(a - s[j - 1][2], s[j + 1][1] - d)
             w = min(10, gap // 4)
@@ -105,7 +107,8 @@ for t in trips:
         seq += [a - t0, round(dist * k)]
         if d > a: seq += [d - t0, round(dist * k)]              # pobyt v zastávce
         zs += [nid(nm), a - t0]
-    out.append([RI[t['route_id']], SI[t['shape_id']], t['service_id'], t0, seq, nid(t['trip_headsign'] or s[-1][4]), zs])
+    fl = (1 if t.get('wheelchair_accessible') == '1' else 0) | (2 if t.get('bikes_allowed') == '1' else 0)
+    out.append([RI[t['route_id']], SI[t['shape_id']], t['service_id'], t0, seq, nid(t['trip_headsign'] or s[-1][4]), zs, dep, t.get('trip_short_name') or '', fl])
 out.sort(key=lambda q: q[3])
 json.dump({'routes': routes, 'shapes': shapes, 'services': services, 'trips': out, 'names': names,
            'feed': next(iter(T('feed_info')), {}).get('feed_version', '') if 'feed_info.txt' in zf.namelist() else time.strftime('%Y-%m-%d', time.localtime(os.path.getmtime(Z)))}, open('site/mhd.json', 'w', encoding='utf-8'), separators=(',', ':'), ensure_ascii=False)

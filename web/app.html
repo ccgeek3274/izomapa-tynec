@@ -274,8 +274,10 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
   <div>
     <p class="label">Vrstvy</p>
     <div class="layers">
-      <label><input type="checkbox" id="l-labels" checked> Popisky</label>
+      <label><input type="checkbox" id="l-towns" checked> Názvy obcí</label>
+      <label><input type="checkbox" id="l-labels"> Popisky</label>
       <label><input type="checkbox" id="l-traffic" checked> Doprava</label>
+      <label><input type="checkbox" id="l-poi"> Zajímavosti</label>
       <label><input type="checkbox" id="l-smoke" checked> Kouř z komínů</label>
       <label><input type="checkbox" id="l-hover" checked> Zvýraznit budovy</label>
     </div>
@@ -332,6 +334,7 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
     <li><b>Budova:</b> klikněte na ni a ukáže se název, adresa a odkaz na Mapy.cz.</li>
     <li><b>Roční období, denní doba a počasí</b> se přepínají v menu. Na mobilu jsou roční období a denní doba i ve spodní liště.</li>
     <li><b>Hledání</b> zná ulice, adresy, budovy i zajímavá místa.</li>
+    <li><b>Zajímavosti:</b> ikonky ukazují pomníky, kříže, zvoničky, sochy, vrcholy, studánky, hřiště a další místa z OpenStreetMap. Klikněte na ikonku. Zapínají se ve Vrstvách.</li>
     <li><b>Sdílet</b> <span class="ico-inline"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11M8 7l4-4 4 4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square"/><path d="M8 10H5v11h14V10h-3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square"/></svg></span> zkopíruje odkaz přesně na to, co právě vidíte, včetně ročního období a denní doby.</li>
   </ul>
   <p class="muted">Vytvořeno nástrojem <a href="https://github.com/adamklatovsky/izomapa" target="_blank" rel="noopener">izomapa</a> od <a href="https://www.adamklatovsky.cz/" target="_blank" rel="noopener">Adama Klatovského</a> (původní mapa: <a href="https://izomapa.fun" target="_blank" rel="noopener">izometrický Liberec</a>).<br>
@@ -350,7 +353,7 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
 <script>
 (async () => {
 
-  const [TILES, OV] = await Promise.all([fetch('tiles.json').then((r) => r.json()), fetch('overlay.json').then((r) => r.json())]);
+  const [TILES, OV] = await Promise.all([fetch('tiles.json', { cache: 'no-cache' }).then((r) => r.json()), fetch('overlay.json', { cache: 'no-cache' }).then((r) => r.json())]);
   // real wind for chimney smoke; the map camera looks from the south-west, so east is right and up, north is left and up
   let realWind = null, realWeather = null, applyRealWeather = () => {};
   // model hlásí kód srážek i při 0 mm: padat smí jen to, co opravdu padá
@@ -646,7 +649,7 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
   const onChunk = [];
   function loadChunk(k) {
     if (CH[k]) return CH[k].ready;
-    CH[k] = { ready: fetch(`overlay/${k}.json`).then((r) => r.json()).then((d) => {
+    CH[k] = { ready: fetch(`overlay/${k}.json${VER}`).then((r) => r.json()).then((d) => {
       Object.assign(CH[k], d);
       for (const b of d.buildings) b.k = k;
       addBuildings(d.buildings);
@@ -682,7 +685,7 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
 
   // ---------- karta ----------
   const ROOF = { flat: 'plochá', gabled: 'sedlová', hipped: 'valbová', pyramidal: 'stanová' };
-  function showCard({ title, text, rows, lon, lat, k }) {
+  function showCard({ title, text, rows, lon, lat, k, web }) {
     $('cardTitle').textContent = title;
     if (k && !(LAYERS.find((l) => l.key === k) || {}).status?.startsWith('hotovo')) { const t = document.createElement('span'); t.className = 'wip-tag'; t.textContent = 'Rozpracováno'; $('cardTitle').append(' ', t); }
     $('cardText').hidden = !text; $('cardText').textContent = text || '';
@@ -695,6 +698,7 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
     const s = document.createElement('a'); s.target = '_blank'; s.rel = 'noopener';
     s.href = `https://mapy.cz/letecka?x=${lon.toFixed(6)}&y=${lat.toFixed(6)}&z=19`; s.textContent = 'Letecký snímek';
     links.append(a, s);
+    for (const [href, t] of web || []) { const w = document.createElement('a'); w.target = '_blank'; w.rel = 'noopener'; w.href = href; w.textContent = t; links.append(w); }
     $('card').style.transform = '';
     $('card').hidden = false;
     setReport(`pt:${lat.toFixed(5)},${lon.toFixed(5)}`, title, lon, lat);     // výchozí cíl hlášení = místo, budova ho přepíše
@@ -735,10 +739,39 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
     const nm = pl ? pl.name : b.name;
     const story = (pl && pl.text) || b.text || (nm && placeByName[nm] ? placeByName[nm].text : null);
     const title = nm || b.cls[0].toUpperCase() + b.cls.slice(1);
-    showCard({ title, text: story, lon: b.lon, lat: b.lat, k: b.k, rows: [
-      ['Adresa', (b.addr || []).join(', ')], ['Typ', nm ? b.cls : null],
-    ] });
+    // obchody a služby z OSM v budově: druh, název (když není v nadpisu), otevírací doba, web
+    const osm = b.osm || [], rows = [['Adresa', (b.addr || []).join(', ')]];
+    if (!osm.length) rows.push(['Typ', nm ? b.cls : null]);
+    for (const m of osm) {
+      rows.push(!m.n || m.n === title ? ['Typ', m.d] : [cap(m.d), m.n]);
+      if (m.o) rows.push(['Otevřeno', m.o]);
+    }
+    const popis = osm.map((m) => m.p).filter(Boolean).join(' ');
+    showCard({ title, text: [story, popis].filter(Boolean).join(' ') || null, lon: b.lon, lat: b.lat, k: b.k, rows,
+      web: [...osm.filter((m) => m.w).map((m) => [m.w, 'Web: ' + (m.n || m.d)]),
+            ...osm.filter((m) => m.wi).map((m) => [m.wi, wikiLabel(m.wi)])] });
     setReport(b.oid ? 'b:' + b.oid : b.id, [title, (b.addr || [])[0]].filter(Boolean).join(', '), b.lon, b.lat);
+  }
+  const cap = (t) => t ? t[0].toUpperCase() + t.slice(1) : t;
+  const wikiLabel = (u) => /wikipedia\.org/.test(u) ? 'Wikipedie' : 'Wikidata';
+  const vyska = (e) => e ? `${String(e).replace('.', ',')} m n. m.` : null;
+  // body z OSM mimo budovy (vyhlídka, pomník, zřícenina…): klik do 15 m (75 px)
+  function poiAt(ix, iy, r = 75) {
+    let best = null, bd = r;
+    for (const k in CH) for (const p of (CH[k].poi || [])) { if (p.b) continue; const d = Math.hypot(ix - p.xy[0], iy - p.xy[1]); if (shown(k) && d < bd) { best = p; bd = d; } }
+    return best;
+  }
+  function showPoi(p) {
+    if (p.b) { const b = hit(p.xy[0], p.xy[1]); if (b) { showBuilding(b); return; } }      // zajímavost v budově: karta budovy
+    state.sel = null;
+    showCard({ title: p.n || cap(p.d), text: p.p, lon: p.lon, lat: p.lat, rows: [['Druh', p.n ? p.d : null], ['Výška', vyska(p.e)], ['Otevřeno', p.o]],
+      web: [...(p.w ? [[p.w, 'Web']] : []), ...(p.wi ? [[p.wi, wikiLabel(p.wi)]] : [])] });
+  }
+  // obec, osada nebo vrchol z popisků při oddálení
+  function showLabel(d) {
+    state.sel = null;
+    showCard({ title: d.name, lon: d.lon, lat: d.lat, k: d.k, rows: [['Druh', d.d || 'vrchol'], ['Obyvatel', d.pop ? d.pop.toLocaleString('cs') : null], ['Výška', vyska(d.e)]],
+      web: d.w ? [[d.w, wikiLabel(d.w)]] : [] });
   }
   function showPoint(ix, iy) {
     state.sel = null;
@@ -747,6 +780,8 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
     let pl = null, bd = 200;
     for (const p of OV.places) { if (!shown(p.k)) continue; const d = Math.hypot(ix - p.xy[0], iy - p.xy[1]); if (d < bd) { pl = p; bd = d; } }
     if (pl) { showCard({ title: pl.name, text: pl.text, lon: pl.lon, lat: pl.lat, k: pl.k, rows: [] }); return; }
+    const po = poiAt(ix, iy);
+    if (po) { showPoi(po); return; }
     showCard({ title: 'Vybrané místo', rows: [], lon, lat });
   }
   const closeCard = () => { $('card').hidden = true; state.sel = null; };
@@ -765,13 +800,20 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
     if (!e.quick) return;
     const v = MHD.drawn.find((q) => Math.hypot(q[0] - e.position.x, q[1] - e.position.y) < 18);
     if (v) { mhdFollow(v[2]); return; }
+    const ic = POI_DRAWN.find((q) => Math.abs(q[0] - e.position.x) < 13 && Math.abs(q[1] - e.position.y) < 13);
+    if (ic) { showPoi(ic[2]); return; }
+    const lb = LABEL_BOXES.find((q) => Math.abs(q[0] - e.position.x) < q[2] && Math.abs(q[1] - e.position.y) < q[3]);
+    if (lb) { showLabel(lb[4]); return; }
     const [ix, iy] = vpToImg(e.position);
     const b = hit(ix, iy);
     if (b) showBuilding(b); else showPoint(ix, iy);
   });
   $('osd').addEventListener('pointermove', (e) => {
-    if (!$('l-hover').checked || e.pointerType === 'touch') { state.hover = null; return; }
     const r = $('osd').getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const overIcon = POI_DRAWN.some((q) => Math.abs(q[0] - mx) < 13 && Math.abs(q[1] - my) < 13) || LABEL_BOXES.some((q) => Math.abs(q[0] - mx) < q[2] && Math.abs(q[1] - my) < q[3]);
+    if (overIcon) { state.hover = null; $('osd').style.cursor = 'pointer'; return; }
+    if (!$('l-hover').checked || e.pointerType === 'touch') { state.hover = null; $('osd').style.cursor = ''; return; }
     const [ix, iy] = vpToImg(new OpenSeadragon.Point(e.clientX - r.left, e.clientY - r.top));
     state.hover = hit(ix, iy);
     $('osd').style.cursor = state.hover ? 'pointer' : '';
@@ -799,11 +841,12 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
   const norm = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   const index = [];
   for (const p of OV.places) index.push({ label: p.name, kind: 'místo', k: p.k, n: norm(p.name), go: () => { goTo(p.xy[0], p.xy[1], 1.4); showCard({ title: p.name, text: p.text, lon: p.lon, lat: p.lat, k: p.k, rows: [] }); } });
+  for (const d of OV.districts || []) if (d.t === 'obec') index.push({ label: d.name, kind: d.d, k: d.k, n: norm(d.name), go: () => { goTo(d.xy[0], d.xy[1], 0.16); showLabel(d); } });
   for (const s of OV.streets) index.push({ label: s.name, kind: 'ulice', k: s.k, n: norm(s.name), go: () => goTo(s.xy[0], s.xy[1], 0.9) });
   // adresy celé mapy jsou ve zvláštním souboru, načtou se při prvním psaní do hledání
   let addrLoad = null;
-  const loadAddr = () => addrLoad || (addrLoad = fetch('search.json').then((r) => r.json()).then((A) => {
-    for (const [a, k, cx, cy, i, kind] of A) index.push({ label: a, kind: kind || 'adresa', k, n: norm(a), go: () => { goTo(cx, cy, 2); loadChunk(k).then((c) => c && showBuilding(c.buildings[i])); } });
+  const loadAddr = () => addrLoad || (addrLoad = fetch('search.json' + VER).then((r) => r.json()).then((A) => {
+    for (const [a, k, cx, cy, i, kind] of A) index.push({ label: a, kind: kind || 'adresa', k, n: norm(a), go: () => { goTo(cx, cy, 2); loadChunk(k).then((c) => { if (!c) return; if (i >= 0) showBuilding(c.buildings[i]); else { const p = poiAt(cx, cy, 3); if (p) showPoi(p); } }); } });
   }).catch(() => {}));
   $('q').addEventListener('focus', loadAddr);
   let res = [], cur = -1;
@@ -824,8 +867,8 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
     if (!addrLoad) { loadAddr().then(() => e.target.dispatchEvent(new Event('input'))); }
     const pool = index.filter((r) => shown(r.k)), seenL = new Set();
     const starts = pool.filter((r) => r.n.startsWith(q)), inside = pool.filter((r) => !r.n.startsWith(q) && r.n.includes(q));
-    const order = { 'místo': 0, budova: 1, ulice: 2, adresa: 3 };
-    res = [...starts, ...inside].filter((r) => !seenL.has(r.kind + r.label) && seenL.add(r.kind + r.label)).sort((a, b) => (a.n.startsWith(q) === b.n.startsWith(q) ? order[a.kind] - order[b.kind] : 0)).slice(0, 8);
+    const order = { 'město': 0, vesnice: 0, 'část obce': 0, osada: 0, 'místo': 0, budova: 1, ulice: 2, adresa: 3 };
+    res = [...starts, ...inside].filter((r) => !seenL.has(r.kind + r.label) && seenL.add(r.kind + r.label)).sort((a, b) => (a.n.startsWith(q) === b.n.startsWith(q) ? (order[a.kind] ?? 1) - (order[b.kind] ?? 1) : 0)).slice(0, 8);
     renderResults();
   });
   $('q').addEventListener('keydown', (e) => {
@@ -870,6 +913,7 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
   try { if (localStorage.getItem('izo-fold') === '1' && !isMobile()) setFold(true); } catch {}
   if (isMobile()) { setMenu(false); $('placesBox').open = false; }
   $('l-labels').addEventListener('change', (e) => $('map').classList.toggle('nolabels', !e.target.checked));
+  $('map').classList.toggle('nolabels', !$('l-labels').checked);
 
   // ---------- minimapa ----------
   const mini = $('mini'), mctx = mini.getContext('2d');
@@ -906,6 +950,55 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
   const fx = $('fx'), ctx = fx.getContext('2d');
   const rnd = (i) => { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
   const DISTRICTS = (OV.districts || []).slice().sort((p, q) => q.a - p.a);
+  // zajímavosti z OSM: pixelové ikonky 7×7 na cedulce 11×11 (barva podle skupiny), kreslí se při přiblížení, klik = karta
+  const POI_DRAWN = [], LABEL_BOXES = [];
+  const GLYPH = {
+    kriz: '...#....#####....#......#......#......#.....###..',
+    pomnik: '...#.....###....###....###....###...#####.#######',
+    socha: '...#.....###.....#.....###....#.#...#####..#####.',
+    zvon: '...#.....###...#####..#####..#####.#######...#...',
+    vrchol: '..........#.....###....####..#############.......',
+    voda: '...#......#.....###...#####..#####...###.........',
+    strom: '..###...#####.#######.#####...###.....#......#...',
+    hriste: '.#####..#.#.#..#.#.#..#.#.#..#.###..#...#.##...##',
+    posil: '.......#.....###...###########...###.....#.......',
+    piknik: '.......#######..#.#...#####..#...#.#.....#.......',
+    ohen: '...#.....##.....###...####...#####..##.##.#######',
+    kemp: '...#.....#.#....#.#...#.#.#..#.#.#.#..#..########',
+    vyhled: '........##.##.#########.#.####.#.##.##.##........',
+    hrad: '#.#.#.########.#####..##.##..##.##..#####..#####.',
+    kostel: '...#.....###.....#.....###...#####..##.##..##.##.',
+    muka: '...#.....###...#...#..#.#.#..#####....#.....###..',
+    kniha: '.......###.####.#.#.##.#.#.##.#.#.####.###.......',
+    muzeum: '...#....#####.#######.#.#.#..#.#.#..#.#.#.#######',
+    lod: '..............#.....#.#####...###................',
+    info: '...#............##......#......#......#.....###..',
+  };
+  const POI_ICON = {
+    'kříž': 'kriz', 'boží muka': 'muka', 'zvonička': 'zvon', 'pomník': 'pomnik', 'válečný pomník': 'pomnik', 'pamětní deska': 'pomnik', 'pamětní kámen': 'pomnik',
+    'busta': 'socha', 'socha': 'socha', 'umělecké dílo': 'socha', 'kostel': 'kostel', 'kaple': 'kostel',
+    'vrchol': 'vrchol', 'pramen': 'voda', 'studánka': 'voda', 'strom': 'strom', 'památný strom': 'strom',
+    'dětské hřiště': 'hriste', 'venkovní posilovna': 'posil', 'piknik': 'piknik', 'ohniště': 'ohen', 'kemp': 'kemp',
+    'vyhlídka': 'vyhled', 'rozhledna': 'vyhled', 'hrad': 'hrad', 'zřícenina': 'hrad', 'archeologické naleziště': 'hrad',
+    'muzeum': 'muzeum', 'galerie': 'muzeum', 'knihobudka': 'kniha', 'půjčovna lodí': 'lod', 'koupaliště': 'voda',
+  };
+  const POI_COL = {   // [podklad, kresba] podle skupiny
+    kriz: ['#efe6cf', '#4a3b2c'], muka: ['#efe6cf', '#4a3b2c'], zvon: ['#efe6cf', '#4a3b2c'], kostel: ['#efe6cf', '#4a3b2c'],
+    pomnik: ['#d9d6cf', '#2f3440'], socha: ['#d9d6cf', '#2f3440'],
+    vrchol: ['#cfe3b4', '#2d4a22'], voda: ['#bfe0f2', '#1f4f7a'], strom: ['#cfe3b4', '#2d4a22'],
+    hriste: ['#f6d79a', '#6b3a12'], posil: ['#f6d79a', '#6b3a12'], piknik: ['#f6d79a', '#6b3a12'], ohen: ['#f6d79a', '#9c2c12'], kemp: ['#f6d79a', '#6b3a12'], lod: ['#f6d79a', '#6b3a12'],
+    vyhled: ['#c9d6f2', '#25335e'], hrad: ['#c9d6f2', '#25335e'], muzeum: ['#c9d6f2', '#25335e'], kniha: ['#c9d6f2', '#25335e'], info: ['#e9e6dc', '#2f3440'],
+  };
+  const poiBitmaps = {};
+  const poiBitmap = (g) => poiBitmaps[g] || (poiBitmaps[g] = (() => {
+    const c = document.createElement('canvas'); c.width = 11; c.height = 14; const x = c.getContext('2d');
+    const [bg, ink] = POI_COL[g] || POI_COL.info;
+    x.fillStyle = '#1b2130'; x.fillRect(1, 0, 9, 11); x.fillRect(0, 1, 11, 9); x.fillRect(5, 11, 1, 3);     // obrys se zkosenými rohy a nožička
+    x.fillStyle = bg; x.fillRect(1, 1, 9, 9);
+    x.fillStyle = ink; const p = GLYPH[g] || GLYPH.info;
+    for (let i = 0; i < 49; i++) if (p[i] === '#') x.fillRect(2 + (i % 7), 2 + Math.floor(i / 7), 1, 1);
+    return c;
+  })());
   const DISPLAY_FONT = getComputedStyle(document.documentElement).getPropertyValue('--display').trim() || 'monospace';
   const sid = (str) => { let h = 7; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0; return Math.abs(h) % 1000003; };
   const occluded = (ix, iy, d) => {
@@ -1124,10 +1217,24 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
   function mhdFollowText() {
     const i = MHD.follow, a = MHD.act.find((q) => q[0] === i);
     if (!a) { $('followTxt').textContent = 'Spoj dojel do cílové zastávky.'; MHD.follow = null; setTimeout(() => { if (MHD.follow === null) $('follow').hidden = true; }, 4000); return; }
-    const t = MHD.trips[i], [line, typ] = MHD.routes[t[0]], z = t[6]; let next = '';
-    for (let k = 0; k < z.length; k += 2) if (z[k + 1] >= a[1]) { next = MHD.names[z[k]]; break; }
-    const b = document.createElement('b'); b.textContent = `${typ === 0 ? 'Tramvaj' : typ === 2 ? 'Vlak' : 'Autobus'} ${line}`;
-    $('followTxt').replaceChildren(b, ` → ${MHD.names[t[5]]}`, next ? ` · další zastávka ${next}` : '');
+    // zastávka, kde vozidlo stojí, nebo další zastávka: čas odjezdu podle jízdního řádu (t[7]; starší mhd.json má jen příjezdy)
+    const t = MHD.trips[i], [line, typ, long] = MHD.routes[t[0]], z = t[6], dep = t[7], el = a[1];
+    const hm = (s) => { s = ((Math.round(s / 60) % 1440) + 1440) % 1440; return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+    let stop = '';
+    for (let k = 0, j = 0; k < z.length; k += 2, j++) {
+      const d = dep ? dep[j] : z[k + 1], last = k === z.length - 2;
+      if (d + 10 < el && !last) continue;                   // odtud už odjelo (v zastávce stojí ±10 s kolem odjezdu)
+      const nm = MHD.names[z[k]], at = el >= z[k + 1] - 1, mins = Math.round((d - el) / 60);
+      const kdy = mins >= 1 ? ` (za ${mins} min)` : '';
+      if (last) stop = at ? ` · v cíli ${nm}` : ` · příjezd ${nm} ${hm(t[3] + z[k + 1])}${mins >= 1 ? ` (za ${mins} min)` : ''}`;
+      else if (k === 0 && el <= d) stop = ` · odjezd z ${nm} ${hm(t[3] + d)}${kdy}`;
+      else stop = at ? ` · v zastávce ${nm}, odjezd ${hm(t[3] + d)}` : ` · další zastávka ${nm}, odjezd ${hm(t[3] + d)}${kdy}`;
+      break;
+    }
+    const b = document.createElement('b'); b.textContent = `${typ === 0 ? 'Tramvaj' : typ === 2 ? 'Vlak' : 'Autobus'} ${line}${t[8] ? ` (${t[8]})` : ''}`;
+    if (long) b.title = long;
+    const fl = t[9] || 0, ic = `${fl & 1 ? ' ♿' : ''}${fl & 2 ? ' 🚲' : ''}`;
+    $('followTxt').replaceChildren(b, ` → ${MHD.names[t[5]]}${stop}${ic}`);
   }
   $('followStop').addEventListener('click', () => { MHD.follow = null; $('follow').hidden = true; });
   viewer.addHandler('canvas-drag', () => { if (MHD.follow !== null) { MHD.follow = null; $('follow').hidden = true; } });
@@ -1161,7 +1268,25 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
       }
     }
   });
-  if (location.hostname === 'localhost') window.__izo = { trams, skiers, MHD, mhdActive, mhdPos, cars, roads, XC };       // ladění v lokálním náhledu
+  // vodáci: v létě ve dne plují po proudu řek (overlay.json rivers, ve směru toku) od vstupu do mapy po výstup, pak zmizí
+  // a po chvíli vyplují znovu od začátku. Asi jedna loď na 1,1 km řeky v mapě (≈ 2 na čtverec s řekou).
+  const boats = [], BOATC = ['#d8352a', '#2f6fd1', '#2aa36b', '#f07a24', '#7b4fc9', '#e0629a'];
+  for (const rv of OV.rivers || []) {
+    const len = [0]; for (let i = 1; i < rv.w.length; i++) len.push(len[i - 1] + Math.hypot(rv.w[i][0] - rv.w[i - 1][0], rv.w[i][1] - rv.w[i - 1][1]));
+    const r = { w: rv.w, len, L: len[len.length - 1] }, n = Math.max(1, Math.round((rv.in || r.L) / 1100));
+    for (let j = 0; j < n; j++) { const i = boats.length + 1; boats.push({ r, s: r.L * (j + rnd(i) * 0.8) / n, v: 1.5 + rnd(i + 1) * 0.9, lane: (rnd(i + 2) - 0.5) * 8, ph: rnd(i + 3) * 6.3, c: i % BOATC.length }); }
+  }
+  function boatPos(q) {
+    const L = q.r.len, w = q.r.w; let i = 1; while (i < L.length - 1 && L[i] < q.s) i++;
+    const t = Math.max(0, Math.min(1, (q.s - L[i - 1]) / ((L[i] - L[i - 1]) || 1)));
+    const a = w[Math.max(0, i - 3)], b = w[Math.min(w.length - 1, i + 2)], dx = b[0] - a[0], dy = b[1] - a[1], dl = Math.hypot(dx, dy) || 1;   // směr vyhlazený přes ~40 m
+    const off = q.lane + Math.sin(q.s / 140 + q.ph) * 2.5;
+    return { x: w[i - 1][0] + (w[i][0] - w[i - 1][0]) * t - dy / dl * off, y: w[i - 1][1] + (w[i][1] - w[i - 1][1]) * t + dx / dl * off, dx, dy };
+  }
+  const underDeck = (x, y) => (OV.decks || []).some((d) => d.p.some((a, i) => { const b = d.p[i + 1]; if (!b) return false;
+    const ex = b[0] - a[0], ey = b[1] - a[1], el2 = ex * ex + ey * ey || 1, t = Math.max(0, Math.min(1, ((x - a[0]) * ex + (y - a[1]) * ey) / el2));
+    return Math.hypot(x - a[0] - ex * t, y - a[1] - ey * t) < d.w / 2 + 2.5; }));
+  if (location.hostname === 'localhost') window.__izo = { trams, skiers, boats, MHD, mhdActive, mhdPos, cars, roads, XC };       // ladění v lokálním náhledu
   function drawSkier(q, sx, ox, oy) {
     const L = q.r.len; let i = 1; while (i < L.length - 1 && L[i] < q.s) i++;
     const a = q.r.w[i - 1], b = q.r.w[i], t = Math.max(0, Math.min(1, (q.s - L[i - 1]) / ((L[i] - L[i - 1]) || 1)));
@@ -1271,7 +1396,7 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
     };
     const c = rgbOf(col), DARK = [31, 31, 33], GLASS = [71, 87, 107], snow = snowy ? [238, 242, 248] : null;
     const near = vis(sxv, syv) ? 1 : -1;                                     // strana přivrácená ke kameře
-    const wheels = (side) => { if (isBus === 2 || isBus === 3 || isBus === 4) return; for (const s_ of isBus ? [-l + 2.6, l - 3.0] : [-1.35, 1.35]) box(s_ - (isBus ? 0.48 : 0.32), s_ + (isBus ? 0.48 : 0.32), side * (w - 0.06) - 0.1, side * (w - 0.06) + 0.1, 0, isBus ? 0.8 : 0.62, DARK); };
+    const wheels = (side) => { if (isBus >= 2) return; for (const s_ of isBus ? [-l + 2.6, l - 3.0] : [-1.35, 1.35]) box(s_ - (isBus ? 0.48 : 0.32), s_ + (isBus ? 0.48 : 0.32), side * (w - 0.06) - 0.1, side * (w - 0.06) + 0.1, 0, isBus ? 0.8 : 0.62, DARK); };
     wheels(-near);
     if (isBus === 4) {
       const [, name, ci] = col.split('|'), M = TRAINS[name], car = M.cars[+ci], h = M.h, nf = car.f ? M.nose : 0, nr = car.r ? M.nose : 0, ROOF = snow || M.roof;
@@ -1338,6 +1463,25 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
       box(-0.5, 0.4, -0.06, 0.06, rz + 0.15, rz + 0.75, YE); box(-0.05, 0.35, -0.06, 0.06, rz + 0.6, rz + 1.05, YE); box(0.15, 0.3, -0.75, 0.75, rz + 1.0, rz + 1.08, YE);
     } else if (isBus === 3) {
       truckFaces({ R, box, faces, fx_, fy_, sxv, syv, vis, sun, l, w, col, snow });
+    } else if (isBus === 5) {                                              // kánoe: žlutá, dva vodáci (vpředu a vzadu), pádlují každý na jiné straně
+      const [, ph, ci] = col.split('|'), YE = [246, 200, 30], IN = [150, 112, 24], SK = [232, 198, 164], PD = [52, 52, 58], SH = rgbOf(BOATC[+ci]);
+      const fp = [[-l, 0], [-l + 0.9, -w], [l - 0.9, -w], [l, 0], [l - 0.9, w], [-l + 0.9, w]], hz = 0.32;
+      for (let i = 0; i < fp.length; i++) {
+        const A = fp[i], B = fp[(i + 1) % fp.length], es = B[0] - A[0], et = B[1] - A[1], el = Math.hypot(es, et), ns = et / el, nt = -es / el;
+        const nx = fx_ * ns + sxv * nt, ny = fy_ * ns + syv * nt;
+        if (vis(nx, ny)) faces.push([[R(A[0], A[1], 0), R(B[0], B[1], 0), R(B[0], B[1], hz), R(A[0], A[1], hz)], lit(YE, sun(nx, ny, 0))]);
+      }
+      faces.push([fp.map(([s_, t_]) => R(s_, t_, hz)), lit(YE, sun(0, 0, 1))]);
+      faces.push([fp.map(([s_, t_]) => R(s_ * 0.86, t_ * 0.62, hz + 0.01)), lit(IN, sun(0, 0, 1))]);
+      const men = [[l - 1.1, +ph ? 1 : -1], [-l + 1.0, +ph ? -1 : 1]].sort((a, b) => (fx_ + fy_) * (b[0] - a[0]));   // vzdálenější první
+      for (const [s0, sg] of men) {
+        box(s0 - 0.24, s0 + 0.24, -0.26, 0.26, 0.2, 1.0, SH);                                    // vesta (postavy trochu větší, ať jsou vidět)
+        box(s0 - 0.15, s0 + 0.15, -0.15, 0.15, 1.0, 1.32, SK);                                    // hlava
+        box(s0 - 0.16, s0 + 0.16, -0.16, 0.16, 1.32, 1.42, [40, 40, 46]);                          // přilba
+        box(s0 + 0.24, s0 + 0.38, sg > 0 ? -0.45 : -0.95, sg > 0 ? 0.95 : 0.45, 0.72, 0.84, PD);  // pádlo přes loď, list ve vodě
+        box(s0 + 0.16, s0 + 0.48, sg * 0.88 - 0.1, sg * 0.88 + 0.1, -0.05, 0.62, PD);
+        box(s0 + 0.22, s0 + 0.4, -sg * 0.5 - 0.08, -sg * 0.5 + 0.08, 0.84, 1.2, PD);              // horní konec
+      }
     } else if (isBus) {                                                     // autobus: bílý, zelený a žlutý pruh, tmavá okna, žluté čelo
       const WH = [238, 238, 234], GR = [30, 140, 84], YL = [244, 196, 28], GL = [40, 44, 52], DOOR = [54, 58, 66], ROOF = snow || [222, 224, 220];
       const ch = 0.45, fp = [[-l + ch, -w], [l - ch, -w], [l, -w + ch], [l, w - ch], [l - ch, w], [-l + ch, w], [-l, w - ch], [-l, -w + ch]];
@@ -1404,7 +1548,7 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
     const s = state.season;
     if (!STROMY[s]) {
       STROMY[s] = { ok: false };
-      Promise.all([fetch(`stromy/${s}.json`).then((r) => r.json()), new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = `stromy/${s}.png`; })])
+      Promise.all([fetch(`stromy/${s}.json${VER}`).then((r) => r.json()), new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = `stromy/${s}.png${VER}`; })])
         .then(([m, im]) => Object.assign(STROMY[s], m, { im, ok: true })).catch(() => {});
     }
     return STROMY[s].ok ? STROMY[s] : null;
@@ -1742,6 +1886,18 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
         drawSkier(q, sx, ox, oy);
       }
     }
+    // vodáci (v létě ve dne)
+    if (boats.length && state.season === 'summer' && night < 0.55) {
+      for (const q of boats) { q.s += q.v * dt; if (q.s > q.r.L) { q.s = -rnd(q.s + t) * 400; q.ph = rnd(q.ph + 1) * 6.3; } }   // na konci zmizí, za chvíli znovu od začátku
+      if (sx > 0.12) for (const q of boats) {
+        if (q.s < 0) continue;
+        const o = boatPos(q);
+        if (!shown(`c${Math.floor((o.x + cam.half) / (2 * cam.half))}_${Math.floor((o.y + cam.half) / (2 * cam.half))}`)) continue;
+        const p = toImg(o.x, o.y, gz(o.x, o.y)); if (!vis(p[0], p[1], 60) || underDeck(o.x, o.y)) continue;
+        o.lane = 0; o.noLights = true;
+        drawVehicle(o, 4.8, 0.86, `kanoe|${Math.floor(t * 1.4 + q.ph) % 2}|${q.c}`, sx, ox, oy, night, 5);
+      }
+    }
     // vánoční strom
     if (snowy && sx > 0.15) for (const pt of xmasPts) if (vis(pt[0], pt[1], 100)) {
       const k = Math.max(1, Math.round(sx * 1.2)), X0 = Math.round(ox + (pt[0] + 30) * sx - 15 * k), Y0 = Math.round(oy + (pt[1] - 4) * sx - 48 * k);
@@ -1789,23 +1945,47 @@ dialog.help ol.vd-list { margin: 0; padding-left: 22px; } ol.vd-list li { margin
         ctx.globalAlpha = 1;
       });
     }
+    // zajímavosti: ikonky na cedulce, velikost na obrazovce stálá; od nejbližších k divákovi (níž na obrazovce = navrch)
+    POI_DRAWN.length = 0;
+    if ($('l-poi').checked && sx > 0.07) {
+      const a = Math.min(1, (sx - 0.07) / 0.05), k = sx > 0.5 ? 3 : 2, list = [];
+      for (const key in CH) { if (!shown(key)) continue; for (const p of (CH[key].poi || [])) if (vis(p.xy[0], p.xy[1], 30)) list.push(p); }
+      list.sort((p, q) => p.xy[1] - q.xy[1]);
+      ctx.globalAlpha = a;
+      for (const p of list) {
+        const X = Math.round(ox + p.xy[0] * sx), Y = Math.round(oy + p.xy[1] * sx);
+        ctx.drawImage(poiBitmap(POI_ICON[p.d] || 'info'), X - Math.floor(5.5 * k), Y - 14 * k, 11 * k, 14 * k);
+        POI_DRAWN.push([X, Y - Math.round(8.5 * k), p]);
+      }
+      ctx.globalAlpha = 1;
+    }
     // názvy čtvrtí: jako mraky – vidět při oddálení, s přiblížením plynule mizí
+    LABEL_BOXES.length = 0;
     {
       const fadeD = Math.max(0, Math.min(1, (0.22 - sx) / 0.14));
-      if (fadeD > 0 && $('l-labels').checked) {
+      if (fadeD > 0 && $('l-towns').checked) {
         ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         const boxes = [];
         for (const d of DISTRICTS) {                      // od největší čtvrti; překrývající se menší popisek vynechat
+          if (d.k && !shown(d.k)) continue;
           const x = ox + d.xy[0] * sx, y = oy + d.xy[1] * sx;
           if (x < -200 || y < -60 || x > cw + 200 || y > ch + 60) continue;
-          const big = d.a > 3 ? 1 : 0.82;
-          ctx.font = `500 ${Math.round(15 * big)}px ${DISPLAY_FONT}`;
-          const tw = ctx.measureText(d.name.toUpperCase()).width / 2 + 6, th = 11;
+          const peak = d.t === 'vrchol';
+          const big = d.a > 3 ? 1 : d.a >= 1 ? 0.82 : peak ? 0.7 : 0.74;
+          const txt = peak ? `${d.name} ${String(d.e || '').replace('.', ',')}${d.e ? ' m' : ''}` : d.name.toUpperCase();
+          ctx.font = `${peak ? 400 : 500} ${Math.round(15 * big)}px ${DISPLAY_FONT}`;
+          const tw = ctx.measureText(txt).width / 2 + 6 + (peak ? 6 : 0), th = 11;
           if (boxes.some(([bx, by, bw]) => Math.abs(bx - x) < bw + tw && Math.abs(by - y) < th * 2)) continue;
           boxes.push([x, y, tw]);
+          if (d.t) LABEL_BOXES.push([x, y, tw, th, d]);
           ctx.globalAlpha = fadeD * 0.9;
-          ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(20,26,40,0.75)'; ctx.strokeText(d.name.toUpperCase(), x, y);
-          ctx.fillStyle = '#f3efe2'; ctx.fillText(d.name.toUpperCase(), x, y);
+          const tx = peak ? x + 6 : x;
+          if (peak) {                                     // vrchol: trojúhelníček před názvem
+            ctx.fillStyle = 'rgba(20,26,40,0.75)'; ctx.beginPath(); ctx.moveTo(tx - tw + 2, y + 5); ctx.lineTo(tx - tw + 8, y - 6); ctx.lineTo(tx - tw + 14, y + 5); ctx.fill();
+            ctx.fillStyle = '#e4d3a8'; ctx.beginPath(); ctx.moveTo(tx - tw + 4, y + 4); ctx.lineTo(tx - tw + 8, y - 3); ctx.lineTo(tx - tw + 12, y + 4); ctx.fill();
+          }
+          ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(20,26,40,0.75)'; ctx.strokeText(txt, tx, y);
+          ctx.fillStyle = peak ? '#e4d3a8' : '#f3efe2'; ctx.fillText(txt, tx, y);
         }
         ctx.restore(); ctx.globalAlpha = 1;
       }
