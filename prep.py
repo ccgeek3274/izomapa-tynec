@@ -401,6 +401,17 @@ for _, r in inf.iterrows():                             # autobusové nádraží
 for _, r in inf.iterrows():
     if r['class'] == 'platform' and r.subtype == 'transit' and r.geom.geom_type in ('Polygon', 'MultiPolygon') and r.geom.area < 2000: fill(r.geom, C['paved'], block=True)
 for q in UP['paved']: fill(Polygon([to_local(lo, la) for la, lo in q]), C['paved'], block=True)
+# zastávky z jízdních řádů a OSM (nastroje/zastavky.py): nástupiště vlaků (i zakreslená jen jako čára), přístřešky níže u mobiliáře
+ZAST = json.load(open('assets/zastavky.json')) if os.path.exists('assets/zastavky.json') else None
+TRAIN_PLAT = []                                          # osy nástupišť vlaků (lokální souřadnice) pro přístřešky
+for _s in (ZAST or {}).get('vlak', []):
+    for _q in _s['nastupiste']:
+        _c = [to_local(lo, la) for la, lo in _q]
+        if len(_c) >= 4 and _c[0] == _c[-1]:
+            _g = Polygon(_c)
+            if _g.is_valid and _g.area < 4000: fill(_g, C['paved'], block=True); TRAIN_PLAT.append(_g)
+        elif len(_c) >= 2:
+            _l = LineString(_c); fill(_l.buffer(1.5, cap_style=2), C['paved'], block=True); TRAIN_PLAT.append(_l)
 
 wat = load('water')
 for _, r in wat.iterrows():
@@ -1209,7 +1220,7 @@ for _, r in bld.iterrows():
         so = SAT['b'].get(r.id, {})
         dom = DOM_BY_ID.get(r.id); dsp = dom['spec'] if dom else None
         if dsp:
-            lm = 'dom'; tenement = panel = False
+            lm = dsp.get('lm', 'dom'); tenement = panel = False      # vlastní model (assets/custom_models.js) má přednost
             if 'r' in dsp: rs = 'flat' if dsp['r'] == 'flat' else dsp['r']
         if not lm and so.get('rs') == 'flat': rs = 'flat'; tenement = False
         # šikmá ze snímku jen u menších domů: velké a vysoké budovy mají na snímku vlastní stín a techniku (falešný hřeben)
@@ -1441,6 +1452,8 @@ print('budov', len(buildings), 'z toho od sousedů', sum(1 for b in buildings if
 
 # ---------------- mobiliář, lampy, oplocení ----------------
 props = {'bench': [], 'lamp': [], 'bin': [], 'recycling': [], 'shelter': [], 'tower': [], 'pole': []}
+ZAST_XY = [to_local(lo, la) for la, lo, _n in (ZAST or {}).get('bus', [])]
+ZAST_BUS = shapely.STRtree([Point(p) for p in ZAST_XY]) if ZAST_XY else None
 lamp_pts = []
 for _, r in inf.iterrows():
     g = r.geom; k = r['class']
@@ -1455,9 +1468,36 @@ for _, r in inf.iterrows():
     elif k == 'power_tower': props['tower'].append([g.x, g.y, z, ang])
     elif k == 'power_pole': props['pole'].append([g.x, g.y, z, ang])
     elif k in ('bus_stop', 'platform'):
+        if ZAST_BUS is not None and len(ZAST_BUS.query(g, predicate='dwithin', distance=30)): continue   # zastávku má jízdní řád přesněji
+        if any(q.distance(g) < 60 for q in TRAIN_PLAT): continue                                          # nádraží: přístřešek je na nástupišti
         if any(math.hypot(g.x - s[0], g.y - s[1]) < 14 for s in props['shelter']): continue
         nd2 = nearest_dir(g, drive_tree, drive_lines, 20)
         props['shelter'].append([g.x, g.y, z, nd2[0] if nd2 else ang])
+# přístřešky podle jízdních řádů: každé nástupiště zvlášť (obě strany silnice), u kraje vozovky, otevřené k silnici;
+# na nástupištích vlaků přístřešek otevřený ke koleji
+def _shelter_at(pt, tree, items, edge):
+    """bod na straně čáry (nejbližší silnice / kolej), aspoň edge(w) od osy; úhel tak, aby byl přístřešek otevřený k čáře"""
+    i = tree.nearest(pt)
+    if i is None or items[i][0].distance(pt) > 25: return None
+    l, w = items[i][0], items[i][1]
+    d = l.project(pt); a = l.interpolate(max(0, d - 1)); b = l.interpolate(min(l.length, d + 1)); q = l.interpolate(d)
+    tx, ty = b.x - a.x, b.y - a.y; tl = math.hypot(tx, ty) or 1; tx, ty = tx / tl, ty / tl
+    side = 1 if tx * (pt.y - q.y) - ty * (pt.x - q.x) >= 0 else -1          # bod vlevo (+1) / vpravo (-1) od směru čáry
+    off = max(math.hypot(pt.x - q.x, pt.y - q.y), edge(w))
+    ang = math.atan2(ty, tx) + (0 if side > 0 else math.pi)                 # zadní stěna je vlevo od směru přístřešku
+    return q.x - ty * side * off, q.y + tx * side * off, ang
+_rail_lines = [(l, 4.5) for _, g, c, w, n in roads if c == 'rail' for l in lines(g)]
+_rail_tree = shapely.STRtree([l for l, _ in _rail_lines]) if _rail_lines else None
+for _g in TRAIN_PLAT:
+    if _rail_tree is None: break
+    c_ = _g.centroid if _g.geom_type == 'Polygon' else _g.interpolate(0.5, normalized=True)
+    r_ = _shelter_at(c_, _rail_tree, _rail_lines, lambda w: 0)
+    if r_ and AREA.contains(Point(r_[0], r_[1])): props['shelter'].append([r_[0], r_[1], float(ground(r_[0], r_[1])), r_[2]])
+for _x, _y in (ZAST_XY if ZAST_BUS is not None else []):
+    r_ = _shelter_at(Point(_x, _y), drive_tree, drive_lines, lambda w: w / 2 + 1.8)
+    if not r_ or not AREA.contains(Point(r_[0], r_[1])): continue
+    if any(math.hypot(r_[0] - s[0], r_[1] - s[1]) < 5 for s in props['shelter']): continue
+    props['shelter'].append([r_[0], r_[1], float(ground(r_[0], r_[1])), r_[2]])
 # lampy podél ulic (v datech jich je jen pár desítek)
 lamp_tree = shapely.STRtree(lamp_pts) if lamp_pts else None
 bm_arr = np.asarray(bmask)

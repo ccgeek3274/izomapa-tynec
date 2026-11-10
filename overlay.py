@@ -65,6 +65,21 @@ for f in sorted(glob.glob('data*/land_use.parquet')):
 AREA_TREE = shapely.STRtree([a[2] for a in AREAS]) if AREAS else None
 PL_TREE = shapely.STRtree([shapely.geometry.Point(p[0], p[1]) for p in PLACES_DB]) if PLACES_DB else None
 
+# obchody, služby a turistické cíle z OSM (nastroje/osm_mista.py): k budově, ve které leží, jinak klikací bod
+OSM_M = []
+if os.path.exists('assets/osm_mista.json'):
+    for m in json.load(open('assets/osm_mista.json', encoding='utf-8')):
+        x, y = to_local(m['lon'], m['lat']); OSM_M.append((float(x), float(y), m))
+OSM_TREE = shapely.STRtree([shapely.geometry.Point(p[0], p[1]) for p in OSM_M]) if OSM_M else None
+OSM_USED = set()
+# zajímavosti, které mají v prohlížeči ikonku (vrstva Zajímavosti) i v budově (kostel, zvonička, hrad); obchody a služby ne
+ZAJIMAVOSTI = {'kostel', 'kaple', 'zvonička', 'hrad', 'zřícenina', 'muzeum', 'rozhledna', 'vyhlídka', 'galerie', 'turistický cíl', 'archeologické naleziště',
+               'pomník', 'pamětní deska', 'pamětní kámen', 'válečný pomník', 'busta', 'socha', 'umělecké dílo', 'kříž', 'boží muka',
+               'vrchol', 'pramen', 'studánka', 'strom', 'památný strom', 'dětské hřiště', 'venkovní posilovna', 'piknik', 'ohniště',
+               'kemp', 'knihobudka', 'půjčovna lodí', 'koupaliště'}
+OSM_NAZEV = ('supermarket', 'hotel', 'penzion', 'restaurace', 'hospoda', 'muzeum', 'pošta', 'škola', 'mateřská škola', 'knihovna', 'lékárna',
+             'úřad', 'policie', 'hasiči', 'kulturní dům', 'banka', 'sportovní areál', 'posilovna', 'stavebniny a hobby', 'zahradnictví', 'kino')
+
 ONE_BUILDING = set(MESTO.get('jedna_budova', []))      # dominanty se zónami střech: v prepu samostatné díly, na mapě jedna budova
 
 
@@ -159,13 +174,25 @@ for chunk in chunks:
             c0 = bpoly.representative_point()
             hits = [AREAS[i] for i in AREA_TREE.query(c0) if AREAS[i][2].contains(c0) and AREAS[i][0] < 400000]
             if hits: name = min(hits, key=lambda a: a[0])[1]
+        osm = []
+        if OSM_TREE is not None:
+            _bp = bpoly.buffer(1.5)
+            for i in OSM_TREE.query(_bp):
+                x_, y_, m_ = OSM_M[i]
+                if _bp.contains(shapely.geometry.Point(x_, y_)): osm.append(m_); OSM_USED.add(m_['id'])
+            osm.sort(key=lambda m_: (m_['druh'] not in OSM_NAZEV, m_.get('nazev') is None))
+        if not name and osm and osm[0]['druh'] in OSM_NAZEV and osm[0].get('nazev') and len({m_.get('nazev') for m_ in osm if m_['druh'] in OSM_NAZEV}) == 1:
+            name = osm[0]['nazev']                          # budova bez názvu, ve které je jeden obchod nebo služba z OSM (Lidl, pošta…)
         pl = list(dict.fromkeys(p[2] for p in inside if p[2] != name))[:4]
         cxi, cyi = round(float(np.mean([p[0] for p in pts]))), round(float(np.mean([p[1] for p in pts])))
         for a in b['addr']:
             addr_index.append([a, K, cxi, cyi, len(buildings)])
         if name: addr_index.append([name, K, cxi, cyi, len(buildings), 'budova'])
+        for m_ in osm:
+            if m_.get('nazev') and m_['nazev'] != name: addr_index.append([m_['nazev'], K, cxi, cyi, len(buildings), 'budova'])
         buildings.append({k: v for k, v in {
-            'pl': pl,
+            'pl': pl, 'osm': [{k: v for k, v in (('n', m_.get('nazev')), ('d', m_['druh']), ('o', m_.get('otevreno')), ('w', m_.get('web')),
+                                                 ('wi', m_.get('wiki')), ('p', m_.get('popis'))) if v} for m_ in osm[:5]],
             'id': f"{K}:{b['id']}", 'oid': b.get('oid'), 'hull': [[round(x), round(y)] for x, y in list(hull.exterior.coords)[:-1]], 'd': d, 'dm': dm, 'fb': fb,
             'name': name, 'text': text, 'cls': b['cls'], 'floors': b['floors'], 'h': None if church else b['h'], 'roof': b['roof'], 'addr': b['addr'],
             'lon': b['lon'], 'lat': b['lat'], 'k': K,
@@ -223,6 +250,19 @@ def gz(x, y):
     return 0.0
 
 
+# OSM místa mimo budovy (vyhlídka, pomník, zřícenina…): klikací bod ve svém čtverci
+# zajímavost v budově (b: 1) má jen ikonku, klik na ni otevře kartu budovy
+for x_, y_, m_ in OSM_M:
+    v_budove = m_['id'] in OSM_USED
+    if v_budove and m_['druh'] not in ZAJIMAVOSTI: continue
+    c = chunk_of(x_, y_)
+    if c not in CKEY: continue
+    OFF = (0.0, 0.0)
+    per_chunk[CKEY[c]].setdefault('poi', []).append({k: v for k, v in (('xy', list(px(x_, y_, gz(x_, y_))[:2])), ('n', m_.get('nazev')), ('d', m_['druh']),
+                                                     ('o', m_.get('otevreno')), ('w', m_.get('web')), ('wi', m_.get('wiki')), ('p', m_.get('popis')),
+                                                     ('e', m_.get('ele')), ('b', 1 if v_budove else None), ('lon', m_['lon']), ('lat', m_['lat'])) if v})
+    if m_.get('nazev') and not v_budove: addr_index.append([m_['nazev'], CKEY[c], *[round(v) for v in px(x_, y_, gz(x_, y_))[:2]], -1, m_['druh']])
+
 # co je potřeba dodat ručně (fotky): klíčové objekty z assets/dominanty.json, žluté značky v režimu „vč. rozpracovaného“
 NEEDS = []     # fotky ke všem dominantám jsou dodané (dřív žluté značky 📷)
 places = []
@@ -265,7 +305,22 @@ for st, n, g in zip(_dv.subtype, _dv.names, _dv.geometry):
     for naz in [MESTO['nazev']] + [o['nazev'] for o in OBCE if o.get('nazev')]:
         nm = nm.replace(naz + '-', '')
     districts.append({'name': nm, 'xy': list(px(rp.x, rp.y, gz(rp.x, rp.y))[:2]), 'a': round(gg.area / 1e6, 2)})
-print('čtvrtí', len(districts))
+# obce a osady z OSM (nastroje/osm_mista.py -> assets/osm_obce.json) a pojmenované vrcholy: popisky při oddálení, klik ukáže kartu
+_dn = {d['name'] for d in districts}
+_A = {'město': 30, 'vesnice': 1.5, 'část obce': 1.2, 'osada': 0.6, 'čtvrť': 0.8, 'samota': 0.3}
+if os.path.exists('assets/osm_obce.json'):
+    for o in json.load(open('assets/osm_obce.json', encoding='utf-8')):
+        x, y = to_local(o['lon'], o['lat']); x, y = float(x), float(y); c = chunk_of(x, y)
+        if c not in CKEY or o['nazev'] in _dn: continue
+        districts.append({k: v for k, v in {'name': o['nazev'], 'xy': list(px(x, y, gz(x, y))[:2]), 'a': _A.get(o['druh'], 1), 't': 'obec', 'd': o['druh'],
+                                            'pop': o.get('obyv'), 'w': o.get('wiki'), 'lon': o['lon'], 'lat': o['lat'], 'k': CKEY[c]}.items() if v})
+for x_, y_, m_ in OSM_M:
+    if m_['druh'] != 'vrchol' or not m_.get('nazev'): continue
+    c = chunk_of(x_, y_)
+    if c not in CKEY: continue
+    districts.append({k: v for k, v in {'name': m_['nazev'], 'xy': list(px(x_, y_, gz(x_, y_))[:2]), 'a': 0.2, 't': 'vrchol', 'e': m_.get('ele'),
+                                        'w': m_.get('wiki'), 'lon': m_['lon'], 'lat': m_['lat'], 'k': CKEY[c]}.items() if v})
+print('čtvrtí, obcí a vrcholů', len(districts))
 # tramvaje: graf kolejí přes všechny čtverce, linky = nejkratší cesta mezi konečnými (TRAM_LINES), tam a zpět
 OFF = (0.0, 0.0)
 tnodes, tadj = {}, {}
@@ -303,7 +358,21 @@ for a_n, b_n, n_ in TRAM_LINES:
     trams.append({'w': [[round(x, 1), round(y, 1)] for x, y, z in pts], 'p': [list(px(x, y, z)) for x, y, z in pts], 'n': n_,
                   'stops': [list(px(TSTOP[n][0], TSTOP[n][1], 0)[:2]) + [n] for n in st]})
     print('tramvaj', a_n, '–', b_n, round(sum(math.hypot(x1 - x0, y1 - y0) for (x0, y0), (x1, y1) in zip(on, on[1:]))), 'm', len(st), 'zastávek')
-json.dump({'w': W, 'h': H, 'cam': cam, 'districts': districts, 'needs': needs, 'xmas': nam, 'chunks': {CKEY[c]: CHUNKS[c] for c in chunks}, 'bus': bus_route, 'trams': trams, 'decks': decks,
+# řeky pro vodáky (nastroje/reky.py, ve směru toku): od prvního vstupu do mapy po poslední výstup, body po 8 m (svět)
+rivers = []
+if os.path.exists('assets/reky.json'):
+    from geo import extent
+    _ext = shapely.geometry.box(*extent(0))
+    for _r in json.load(open('assets/reky.json')):
+        _l = shapely.geometry.LineString(zip(*to_local([q[1] for q in _r['body']], [q[0] for q in _r['body']])))
+        _in = [q for q in (lambda g: list(g.geoms) if hasattr(g, 'geoms') else [g])(_l.intersection(_ext)) if q.length > 0]
+        if not _in: continue
+        _a, _b = min(_l.project(q.interpolate(0)) for q in _in), max(_l.project(q.interpolate(1, normalized=True)) for q in _in)
+        _s = shapely.ops.substring(_l, _a, _b)
+        _pts = [_s.interpolate(d) for d in list(np.arange(0, _s.length, 8.0)) + [_s.length]]
+        rivers.append({'n': _r['nazev'], 'w': [[round(p.x, 1), round(p.y, 1)] for p in _pts], 'in': round(sum(q.length for q in _in))})
+        print('řeka', _r['nazev'], round(_s.length), 'm, v mapě', rivers[-1]['in'], 'm')
+json.dump({'w': W, 'h': H, 'cam': cam, 'districts': districts, 'needs': needs, 'xmas': nam, 'chunks': {CKEY[c]: CHUNKS[c] for c in chunks}, 'bus': bus_route, 'trams': trams, 'decks': decks, 'rivers': rivers,
            'streets': streets, 'places': places},
           open('site/overlay.json', 'w'), separators=(',', ':'), ensure_ascii=False)
 json.dump(addr_index, open('site/search.json', 'w'), separators=(',', ':'), ensure_ascii=False)   # adresy pro hledání, načte se až při psaní
